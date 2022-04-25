@@ -5,14 +5,12 @@ package proto;
 message Void {
 }
 
-enum Consistency {
-    STRONG = 0;
-    RELAXED_READS = 1;
-}
+// ---------------------------------------------------------------
+// Chiselstore SQL messages
+// ---------------------------------------------------------------
 
 message Query {
     string sql = 1;
-    Consistency consistency = 2;
 }
 
 message QueryResults {
@@ -23,6 +21,250 @@ message QueryRow {
     repeated string values = 1;
 }
 
+// ---------------------------------------------------------------
+// Rpc messages for communication on the Rpc layer
+// Similar to OmniPaxos messages found in omnipaxos_core/src/.. 
+// ---------------------------------------------------------------
+
+// Current round
+message RpcBallot {
+    uint32 n = 1;
+    uint64 priority = 2;
+    uint64 pid = 3;
+}
+
+// The SQL command but in Rpc format
+message RpcStoreCommand {
+    uint64 id = 1; 
+    string sql = 2;
+}
+
+// SyncItem is used for log synchronization in the Prepare phase
+message RpcSyncItem {
+    oneof item {
+        Entries entries = 1;
+        Snapshot snapshot = 2;
+        None none = 3;
+    }
+    message Entries {
+        repeated RpcStoreCommand vec = 1;
+    }
+    enum Snapshot {
+        Complete = 0;
+        Delta = 1;
+        Phantom = 2;
+    }
+    message None {
+    }
+}
+
+// ---------------------------------------------------------------
+// OmniPaxos core events (Rpc format).
+// ---------------------------------------------------------------
+
+// Prepare message sent by a newly-elected leader to initiate the Prepare phase.
+message RpcPrepare {
+    // The current round.
+    RpcBallot n = 1; 
+    // The decided index of this leader.
+    uint64 ld = 2; 
+     // The latest round in which an entry was accepted.
+    RpcBallot n_accepted = 3;
+    // The log length of this leader.
+    uint64 la = 4; 
+}
+
+// A StopSign entry that marks the end of a configuration. Used for reconfiguration.
+message RpcStopSign {
+    uint32 config_id = 1;
+    repeated uint64 nodes = 2;
+    optional Metadata metadata = 3;
+    message Metadata {
+        repeated uint32 vec = 1;
+    }
+}
+
+// Promise message sent by a follower in response to a [`Prepare`] sent by the leader.
+message RpcPromise {
+    // The current round.
+    RpcBallot n = 1; 
+    // The latest round in which an entry was accepted.
+    RpcBallot n_accepted = 2; 
+    // The suffix of missing entries at the leader.
+    optional RpcSyncItem sync_item = 3; 
+    // The decided index of this follower.
+    uint64 ld = 4; 
+    // The log length of this follower.
+    uint64 la = 5; 
+    // The StopSign accepted by this follower
+    optional RpcStopSign stopsign = 6; 
+}
+
+// AcceptSync message sent by the leader to synchronize the logs of all replicas in the prepare phase.
+message RpcAcceptSync {
+     // The current round.
+    RpcBallot n = 1;
+    // Entries that the receiving replica is missing in its log.
+    RpcSyncItem sync_item = 2; 
+    // The index of the log where the entries from `sync_item` should be applied at or the compacted idx
+    uint64 sync_idx = 3; 
+    // The decided index.
+    optional uint64 decide_idx = 4; 
+     // StopSign to be accepted.
+    optional RpcStopSign stopsign = 5;
+}
+
+// The first accept message sent. Only used by a pre-elected leader after reconfiguration.
+message RpcFirstAccept {
+    RpcBallot n = 1;
+    repeated RpcStoreCommand entries = 2;
+}
+
+// Message with entries to be replicated and the latest decided index sent by the leader in the accept phase.
+message RpcAcceptDecide {
+    RpcBallot n = 1;
+    uint64 ld = 2;
+    // Entries to be replicated.
+    repeated RpcStoreCommand entries = 3; 
+}
+
+// Message sent by follower to leader when entries has been accepted.
+message RpcAccepted {
+    // The current round.
+    RpcBallot n = 1;
+    // The accepted index. 
+    uint64 la = 2; 
+}
+
+// Message sent by leader to followers to decide up to a certain index in the log.
+message RpcDecide {
+    RpcBallot n = 1;
+    // The decided index.
+    uint64 ld = 2; 
+}
+
+// Message sent by leader to followers to accept a StopSign
+message RpcAcceptStopSign {
+    RpcBallot n = 1;
+    // The decided index.
+    RpcStopSign ss = 2; 
+}
+
+// Message sent by followers to leader when accepted StopSign
+message RpcAcceptedStopSign {
+    // The current round.
+    RpcBallot n = 1; 
+}
+
+// Message sent by leader to decide a StopSign
+message RpcDecideStopSign {
+    RpcBallot n = 1;
+}
+
+// Compaction Request - way to prevent too large logs
+message RpcCompaction {
+    oneof compaction {
+        Trim trim = 1;
+        uint64 snapshot = 2;
+    }
+    message Trim {
+        optional uint64 trim = 1;
+    }
+}
+
+// Forward client proposals to the leader.
+message RpcProposalForward {
+    repeated RpcStoreCommand entries = 1;
+}
+
+message RpcPrepareReq {
+}
+
+// An enum for all the different message types.
+message RpcPMessage {
+    uint64 from = 1;
+    uint64 to = 2;
+    oneof msg {
+        // Request a [`Prepare`] to be sent from the leader. Used for fail-recovery.
+        RpcPrepareReq rpc_prepare_req = 3;
+        RpcPrepare rpc_prepare = 4;
+        RpcPromise rpc_promise = 5;
+        RpcAcceptSync rpc_accept_sync = 6;
+        RpcFirstAccept rpc_first_accept = 7;
+        RpcAcceptDecide rpc_accept_decide = 8;
+        RpcAccepted rpc_accepted = 9;
+        RpcDecide rpc_decide = 10;
+        // Forward client proposals to the leader.
+        RpcProposalForward rpc_proposal_forward = 11;
+        RpcCompaction rpc_compaction = 12;
+        RpcCompaction rpc_forward_compaction = 13;
+        RpcAcceptStopSign rpc_accept_stop_sign = 14;
+        RpcAcceptedStopSign rpc_accepted_stop_sign = 15;
+        RpcDecideStopSign rpc_decide_stop_sign = 16;
+    }
+}
+
+// ---------------------------------------------------------------
+// Ballot leader election messages (Still Rpc layer).
+// ---------------------------------------------------------------
+
+message RpcHeartbeatRequest {
+    uint32 round = 1;
+}
+
+message RpcHeartbeatReply {
+    uint32 round = 1;
+    RpcBallot ballot = 2;
+    bool majority_connected = 3;
+}
+
+message RpcBleMessage {
+    uint64 from = 1;
+    uint64 to = 2;
+    oneof msg {
+        RpcHeartbeatRequest heartbeat_req = 3;
+        RpcHeartbeatReply heartbeat_rep = 4;
+    }
+}
+
+// RPC interface with function declarations
+service RPC {
+    // execute an sql query
+    rpc Execute(Query) returns (QueryResults);
+    // for sending sequence paxos message
+    rpc Sp_message(RpcPMessage) returns (Void);
+    // for sending ballot leader election message
+    rpc Ble_message(RpcBleMessage) returns (Void);
+}
+
+
+// Snapshottning not handled currently. 
+
+// enum SnapshotEnum {
+//     Complete = 0;
+//     Delta = 1;
+//     Phantom = 2;
+// }
+
+// message Snapshot {
+//     SnapshotEnum t = 1;
+//     map<uint64, string> s = 2;
+// }
+
+
+// ---------------------------------------------------------------
+// Old Raft messages and RPC Network interface
+// ---------------------------------------------------------------
+
+    /* ---- Raft Rpc ? ----
+    rpc Vote(VoteRequest) returns (Void);
+    rpc RespondToVote(VoteResponse) returns (Void);
+    rpc AppendEntries(AppendEntriesRequest) returns (Void);
+    rpc RespondToAppendEntries(AppendEntriesResponse) returns (Void);
+    */
+
+
+/*
 message VoteRequest {
     uint64 from_id = 1;
     uint64 term = 2;
@@ -60,10 +302,4 @@ message AppendEntriesResponse {
     optional uint64 mismatch_index = 5;
 }
 
-service RPC {
-    rpc Execute(Query) returns (QueryResults);
-    rpc Vote(VoteRequest) returns (Void);
-    rpc RespondToVote(VoteResponse) returns (Void);
-    rpc AppendEntries(AppendEntriesRequest) returns (Void);
-    rpc RespondToAppendEntries(AppendEntriesResponse) returns (Void);
-}
+*/
